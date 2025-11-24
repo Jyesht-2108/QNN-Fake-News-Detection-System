@@ -321,7 +321,7 @@ def main():
     print("=" * 60)
     
     # Configuration
-    DATASET_PATH = 'data/WELFake_Dataset.csv'  # Update this path
+    DATASET_PATH = 'data/Enhanced_FakeNews_Dataset.csv'  # Update this path
     DATASET_TYPE = 'welfake'  # or 'liar'
     N_FEATURES = 8  # Number of quantum features
     N_QUBITS = 8  # Should match n_features
@@ -329,7 +329,7 @@ def main():
     EPOCHS = 50
     BATCH_SIZE = 10
     LEARNING_RATE = 0.01
-    SAMPLE_SIZE = 1000  # Use subset for faster training (set to None for full dataset)
+    SAMPLE_SIZE = None  # Use subset for faster training (set to None for full dataset)
     
     # Create results directory
     results_dir = Path('results')
