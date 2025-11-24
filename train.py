@@ -366,6 +366,26 @@ def main():
         print(f"Generated synthetic dataset:")
         print(f"  Training samples: {len(X_train)}")
         print(f"  Test samples: {len(X_test)}")
+        
+        # Create a dummy preprocessor for synthetic data
+        # This allows the demo to work with the trained model
+        print("\nCreating preprocessor for synthetic data...")
+        from data_preprocessing import TextPreprocessor
+        preprocessor = TextPreprocessor(n_features=N_FEATURES)
+        
+        # Fit on some dummy text data so it can be used later
+        dummy_texts = [
+            "This is a sample real news article about science and technology.",
+            "FAKE NEWS ALERT! You won't believe this shocking revelation!",
+            "Government officials announce new policy regarding infrastructure.",
+            "Amazing miracle cure discovered! Doctors hate this one trick!",
+        ]
+        dummy_labels = np.array([0, 1, 0, 1])
+        preprocessor.fit_transform(dummy_texts, dummy_labels)
+        
+        # Save the preprocessor
+        preprocessor.save('results/preprocessor.pkl')
+        print("✓ Preprocessor saved")
     
     # Step 2: Create quantum model
     print("\n" + "=" * 60)

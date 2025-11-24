@@ -159,6 +159,12 @@ class TextPreprocessor:
         cleaned_texts = [self.clean_text(text) for text in texts]
         tfidf_features = self.vectorizer.transform(cleaned_texts).toarray()
         reduced_features = self.pca.transform(tfidf_features)
+        
+        # Pad with zeros if we have fewer components than requested
+        if reduced_features.shape[1] < self.n_features:
+            padding = np.zeros((reduced_features.shape[0], self.n_features - reduced_features.shape[1]))
+            reduced_features = np.hstack([reduced_features, padding])
+        
         reduced_features = self.scaler.transform(reduced_features)
         
         return reduced_features

@@ -50,14 +50,19 @@ def demo_prediction():
     if model_path.exists() and preprocessor_path.exists():
         print("\n✓ Loading trained model...")
         
-        # Load model and preprocessor
-        qnn = QuantumNeuralNetwork(n_qubits=8, n_layers=3)
-        qnn.load(str(model_path))
-        
-        preprocessor = TextPreprocessor(n_features=8)
-        preprocessor.load(str(preprocessor_path))
-        
-        print("✓ Model loaded successfully!")
+        try:
+            # Load model and preprocessor
+            qnn = QuantumNeuralNetwork(n_qubits=8, n_layers=3)
+            qnn.load(str(model_path))
+            
+            preprocessor = TextPreprocessor(n_features=8)
+            preprocessor.load(str(preprocessor_path))
+            
+            print("✓ Model loaded successfully!")
+        except Exception as e:
+            print(f"✗ Error loading model: {e}")
+            print("Training a quick demo model instead...")
+            model_path = None  # Force training
         
     else:
         print("\n✗ No trained model found. Training a quick demo model...")
