@@ -1,0 +1,5 @@
+# This file ensures the data directory is tracked by git
+# Place your dataset files here:
+# - WELFake_Dataset.csv
+# - train.tsv (LIAR dataset)
+# - test.tsv (LIAR dataset)
