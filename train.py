@@ -121,7 +121,8 @@ class QuantumTrainer:
                 return compute_cost(self.qnn, X_batch, y_batch)
             
             # Perform optimization step
-            params = self.qnn.get_params()
+            from pennylane import numpy as pnp
+            params = pnp.array(self.qnn.get_params(), requires_grad=True)
             params, cost = self.opt.step_and_cost(cost_fn, params)
             self.qnn.set_params(params)
             

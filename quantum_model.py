@@ -46,8 +46,9 @@ class QuantumNeuralNetwork:
         # Each layer has: n_qubits rotations (3 params each) + n_qubits entangling gates
         self.n_params = n_layers * n_qubits * 3
         
-        # Initialize parameters randomly
-        self.params = np.random.randn(n_layers, n_qubits, 3) * 0.1
+        # Initialize parameters randomly with requires_grad=True for PennyLane
+        from pennylane import numpy as pnp
+        self.params = pnp.array(np.random.randn(n_layers, n_qubits, 3) * 0.1, requires_grad=True)
         
         print(f"Quantum Neural Network initialized:")
         print(f"  Qubits: {n_qubits}")
@@ -161,7 +162,9 @@ class QuantumNeuralNetwork:
         # expectation = -1 -> prob = 1 (fake news)
         probability = (1 - expectation) / 2
         
-        return float(probability)
+        # Don't convert to float during training (breaks gradients)
+        # Return as-is to maintain gradient tracking
+        return probability
     
     def predict(self, features: np.ndarray, threshold: float = 0.5) -> int:
         """
@@ -175,7 +178,9 @@ class QuantumNeuralNetwork:
             Predicted class (0 or 1)
         """
         prob = self.predict_proba(features)
-        return 1 if prob >= threshold else 0
+        # Convert to float for comparison (safe here, not in gradient path)
+        prob_val = float(prob) if hasattr(prob, '__float__') else prob
+        return 1 if prob_val >= threshold else 0
     
     def predict_batch(self, X: np.ndarray, threshold: float = 0.5) -> np.ndarray:
         """
@@ -199,7 +204,12 @@ class QuantumNeuralNetwork:
     
     def set_params(self, params: np.ndarray):
         """Set model parameters."""
-        self.params = params.copy()
+        from pennylane import numpy as pnp
+        # Ensure parameters are trainable
+        if not isinstance(params, pnp.tensor):
+            self.params = pnp.array(params, requires_grad=True)
+        else:
+            self.params = params
     
     def save(self, filepath: str):
         """Save model parameters to disk."""
@@ -238,7 +248,7 @@ class QuantumNeuralNetwork:
         return qml.draw(qnode)(sample_features, self.params)
 
 
-def compute_cost(qnn: QuantumNeuralNetwork, X: np.ndarray, y: np.ndarray) -> float:
+def compute_cost(qnn: QuantumNeuralNetwork, X: np.ndarray, y: np.ndarray):
     """
     Compute binary cross-entropy loss for the quantum model.
     
@@ -248,18 +258,21 @@ def compute_cost(qnn: QuantumNeuralNetwork, X: np.ndarray, y: np.ndarray) -> flo
         y: True labels
         
     Returns:
-        Average loss over all samples
+        Average loss over all samples (maintains gradient tracking)
     """
+    from pennylane import numpy as pnp
+    
     total_loss = 0.0
     epsilon = 1e-7  # For numerical stability
     
     for features, label in zip(X, y):
         pred_prob = qnn.predict_proba(features)
-        # Binary cross-entropy
-        loss = -(label * np.log(pred_prob + epsilon) + 
-                (1 - label) * np.log(1 - pred_prob + epsilon))
+        # Binary cross-entropy (use pnp.log to maintain gradients)
+        loss = -(label * pnp.log(pred_prob + epsilon) + 
+                (1 - label) * pnp.log(1 - pred_prob + epsilon))
         total_loss += loss
     
+    # Return without converting to float (maintains gradient tracking)
     return total_loss / len(X)
 
 
