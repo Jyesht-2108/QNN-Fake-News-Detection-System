@@ -1,4 +1,4 @@
-"""
+ """
 OPTIMIZED FAST Training - 10-15 Minutes
 =======================================
 Balanced configuration for speed and accuracy.
