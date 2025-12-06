@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /Users/prince/Documents/QNN-Fake_News_Detection/myvenv
+set -gx VIRTUAL_ENV /home/jyesht/projects/QNN-Fake-News-Detection-System/myvenv
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH

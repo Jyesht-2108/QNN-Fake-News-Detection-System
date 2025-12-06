@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from sklearn.metrics import accuracy_score
 import random
+import json
 
 from quantum_model import QuantumNeuralNetwork
 from data_preprocessing import TextPreprocessor
