@@ -1,3 +1,6 @@
-# Web API requirements (in addition to main requirements.txt)
-flask==3.0.0
-flask-cors==4.0.0
+# Web server requirements
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# Include all base requirements
+-r requirements.txt

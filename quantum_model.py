@@ -1,331 +1,207 @@
 """
 Quantum Neural Network Model for Fake News Detection
 ====================================================
-This module implements a variational quantum classifier using PennyLane.
-It includes quantum feature encoding and a parameterized quantum circuit.
+Implements strict paper specifications:
+- 4 qubits
+- Angle encoding with Ry(pi * x_i)
+- 3 variational layers with Rx, Ry, Rz + CNOT entanglement
+- Pauli-Z measurement on qubit 0
 """
 
 import pennylane as qml
 import numpy as np
-from typing import Tuple, List
+import torch
+import torch.nn as nn
+from typing import Optional
 import pickle
 
 
-class QuantumNeuralNetwork:
+class QuantumCircuit:
     """
-    Variational Quantum Classifier for binary classification.
-    
-    This class implements a hybrid quantum-classical neural network with:
-    - Amplitude encoding for classical features
-    - Variational quantum circuit with trainable parameters
-    - Measurement-based classification
+    Quantum circuit following paper specifications.
     """
     
-    def __init__(
-        self,
-        n_qubits: int = 4,
-        n_layers: int = 3,
-        device_name: str = 'default.qubit'
-    ):
+    def __init__(self, n_qubits: int = 4, n_layers: int = 3):
         """
-        Initialize the quantum neural network.
+        Initialize quantum circuit.
         
         Args:
-            n_qubits: Number of qubits (should match number of features)
-            n_layers: Number of variational layers in the circuit
-            device_name: PennyLane device to use ('default.qubit' for simulation)
+            n_qubits: Number of qubits (default: 4)
+            n_layers: Number of variational layers (default: 3)
         """
         self.n_qubits = n_qubits
         self.n_layers = n_layers
-        self.device_name = device_name
         
         # Create quantum device
-        self.dev = qml.device(device_name, wires=n_qubits)
+        self.dev = qml.device('default.qubit', wires=n_qubits)
         
-        # Calculate number of parameters needed
-        # Each layer has: n_qubits rotations (3 params each) + n_qubits entangling gates
+        # Calculate number of parameters: n_layers * n_qubits * 3 (Rx, Ry, Rz per qubit)
         self.n_params = n_layers * n_qubits * 3
         
-        # Initialize parameters randomly with requires_grad=True for PennyLane
-        from pennylane import numpy as pnp
-        self.params = pnp.array(np.random.randn(n_layers, n_qubits, 3) * 0.1, requires_grad=True)
-        
-        print(f"Quantum Neural Network initialized:")
+        print(f"Quantum Circuit initialized:")
         print(f"  Qubits: {n_qubits}")
         print(f"  Layers: {n_layers}")
         print(f"  Parameters: {self.n_params}")
-        print(f"  Device: {device_name}")
     
-    def amplitude_encoding(self, features: np.ndarray):
+    def angle_encoding(self, features):
         """
-        Encode classical features into quantum state using amplitude encoding.
-        
-        This normalizes the feature vector and encodes it as amplitudes of a quantum state.
-        For n features, we need log2(n) qubits (rounded up).
+        Angle encoding: Ry(pi * x_i) for each feature.
+        Maps 8 features to 4 qubits (2 features per qubit with re-uploading).
         
         Args:
-            features: Classical feature vector
+            features: Input features (8-dimensional)
         """
-        # Normalize features to create valid quantum state
-        norm = np.linalg.norm(features)
-        if norm > 0:
-            features = features / norm
-        
-        # Pad features to match 2^n_qubits if needed
-        required_size = 2 ** self.n_qubits
-        if len(features) < required_size:
-            features = np.pad(features, (0, required_size - len(features)))
-        elif len(features) > required_size:
-            features = features[:required_size]
-        
-        # Use PennyLane's amplitude embedding
-        qml.AmplitudeEmbedding(features, wires=range(self.n_qubits), normalize=True)
+        # Map 8 features to 4 qubits (2 features per qubit)
+        for i in range(self.n_qubits):
+            if i * 2 < len(features):
+                qml.RY(np.pi * features[i * 2], wires=i)
+            if i * 2 + 1 < len(features):
+                qml.RY(np.pi * features[i * 2 + 1], wires=i)
     
-    def angle_encoding(self, features: np.ndarray):
+    def variational_layer(self, params):
         """
-        Alternative: Encode classical features using angle encoding.
-        
-        Each feature is encoded as a rotation angle on a qubit.
-        This is simpler but may be less expressive than amplitude encoding.
-        
-        Args:
-            features: Classical feature vector (length should match n_qubits)
-        """
-        for i, feature in enumerate(features[:self.n_qubits]):
-            qml.RY(feature * np.pi, wires=i)
-    
-    def variational_layer(self, params: np.ndarray):
-        """
-        Apply one variational layer to the quantum circuit.
-        
-        Each layer consists of:
-        1. Parameterized rotations on each qubit (RX, RY, RZ)
-        2. Entangling gates (CNOT) between adjacent qubits
+        One variational layer with:
+        1. Parameterized Rx, Ry, Rz on each qubit
+        2. CNOT gates between adjacent qubits
         
         Args:
             params: Parameters for this layer (shape: [n_qubits, 3])
         """
-        # Parameterized rotations on each qubit
+        # Parameterized rotations
         for i in range(self.n_qubits):
-            qml.Rot(params[i, 0], params[i, 1], params[i, 2], wires=i)
+            qml.RX(params[i, 0], wires=i)
+            qml.RY(params[i, 1], wires=i)
+            qml.RZ(params[i, 2], wires=i)
         
-        # Entangling layer: CNOT gates in a ring topology
-        for i in range(self.n_qubits):
-            qml.CNOT(wires=[i, (i + 1) % self.n_qubits])
+        # Entanglement: CNOT between adjacent qubits
+        for i in range(self.n_qubits - 1):
+            qml.CNOT(wires=[i, i + 1])
     
-    def quantum_circuit(self, features: np.ndarray, params: np.ndarray) -> float:
+    def circuit(self, features, params):
         """
-        Complete quantum circuit for classification.
+        Complete quantum circuit.
         
         Args:
-            features: Input features to encode
-            params: Variational parameters
+            features: Input features (8-dimensional)
+            params: Variational parameters (shape: [n_layers, n_qubits, 3])
             
         Returns:
-            Expectation value of measurement (used for classification)
+            Expectation value of Pauli-Z on qubit 0
         """
-        # Encode classical data
-        self.amplitude_encoding(features)
+        # Angle encoding
+        self.angle_encoding(features)
         
-        # Apply variational layers
-        for layer_params in params:
+        # Variational layers
+        params_reshaped = params.reshape(self.n_layers, self.n_qubits, 3)
+        for layer_params in params_reshaped:
             self.variational_layer(layer_params)
         
-        # Measure expectation value of first qubit in Z basis
-        # This gives a value between -1 and 1
+        # Measurement: Pauli-Z on qubit 0
         return qml.expval(qml.PauliZ(0))
     
     def create_qnode(self):
-        """
-        Create a QNode (quantum node) that can be executed and differentiated.
-        
-        Returns:
-            QNode function
-        """
-        return qml.QNode(self.quantum_circuit, self.dev, interface='autograd')
+        """Create QNode for execution."""
+        return qml.QNode(self.circuit, self.dev, interface='torch')
+
+
+class HybridQuantumModel(nn.Module):
+    """
+    Hybrid Classical-Quantum Model for Fake News Detection.
     
-    def predict_proba(self, features: np.ndarray) -> float:
+    Architecture:
+    Input (8-dim) -> Quantum Circuit -> Sigmoid -> Output Probability
+    """
+    
+    def __init__(self, n_qubits: int = 4, n_layers: int = 3):
         """
-        Predict probability for a single sample.
+        Initialize hybrid model.
         
         Args:
-            features: Feature vector for one sample
+            n_qubits: Number of qubits
+            n_layers: Number of variational layers
+        """
+        super().__init__()
+        
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        
+        # Initialize quantum circuit
+        self.qcircuit = QuantumCircuit(n_qubits, n_layers)
+        self.qnode = self.qcircuit.create_qnode()
+        
+        # Trainable quantum parameters
+        self.q_params = nn.Parameter(
+            torch.randn(self.qcircuit.n_params) * 0.1
+        )
+        
+        print(f"Hybrid Quantum Model initialized with {self.qcircuit.n_params} trainable parameters")
+    
+    def forward(self, x):
+        """
+        Forward pass through the hybrid model.
+        
+        Args:
+            x: Input features (batch_size, 8)
             
         Returns:
-            Probability of class 1 (fake news)
+            Output probabilities (batch_size, 1)
         """
-        qnode = self.create_qnode()
-        expectation = qnode(features, self.params)
+        batch_size = x.shape[0]
+        outputs = []
+        
+        for i in range(batch_size):
+            # Get quantum circuit output (expectation value in [-1, 1])
+            qout = self.qnode(x[i], self.q_params)
+            outputs.append(qout)
+        
+        # Stack outputs
+        outputs = torch.stack(outputs)
         
         # Convert expectation value [-1, 1] to probability [0, 1]
-        # expectation = 1 -> prob = 0 (real news)
-        # expectation = -1 -> prob = 1 (fake news)
-        probability = (1 - expectation) / 2
+        # expectation = 1 -> prob = 0, expectation = -1 -> prob = 1
+        probs = (1 - outputs) / 2
         
-        # Don't convert to float during training (breaks gradients)
-        # Return as-is to maintain gradient tracking
-        return probability
-    
-    def predict(self, features: np.ndarray, threshold: float = 0.5) -> int:
-        """
-        Predict class label for a single sample.
+        # Apply sigmoid for additional non-linearity
+        probs = torch.sigmoid(probs)
         
-        Args:
-            features: Feature vector for one sample
-            threshold: Classification threshold
-            
-        Returns:
-            Predicted class (0 or 1)
-        """
-        prob = self.predict_proba(features)
-        # Convert to float for comparison (safe here, not in gradient path)
-        prob_val = float(prob) if hasattr(prob, '__float__') else prob
-        return 1 if prob_val >= threshold else 0
-    
-    def predict_batch(self, X: np.ndarray, threshold: float = 0.5) -> np.ndarray:
-        """
-        Predict class labels for multiple samples.
-        
-        Args:
-            X: Feature matrix (n_samples, n_features)
-            threshold: Classification threshold
-            
-        Returns:
-            Array of predicted classes
-        """
-        predictions = []
-        for features in X:
-            predictions.append(self.predict(features, threshold))
-        return np.array(predictions)
-    
-    def get_params(self) -> np.ndarray:
-        """Get current model parameters."""
-        return self.params.copy()
-    
-    def set_params(self, params: np.ndarray):
-        """Set model parameters."""
-        from pennylane import numpy as pnp
-        # Ensure parameters are trainable
-        if not isinstance(params, pnp.tensor):
-            self.params = pnp.array(params, requires_grad=True)
-        else:
-            self.params = params
+        return probs.unsqueeze(1)
     
     def save(self, filepath: str):
-        """Save model parameters to disk."""
-        with open(filepath, 'wb') as f:
-            pickle.dump({
-                'params': self.params,
-                'n_qubits': self.n_qubits,
-                'n_layers': self.n_layers,
-                'device_name': self.device_name
-            }, f)
+        """Save model parameters."""
+        torch.save({
+            'q_params': self.q_params.data,
+            'n_qubits': self.n_qubits,
+            'n_layers': self.n_layers
+        }, filepath)
         print(f"Model saved to {filepath}")
     
     def load(self, filepath: str):
-        """Load model parameters from disk."""
-        with open(filepath, 'rb') as f:
-            data = pickle.load(f)
-            self.params = data['params']
-            self.n_qubits = data['n_qubits']
-            self.n_layers = data['n_layers']
-            self.device_name = data['device_name']
-            # Recreate device
-            self.dev = qml.device(self.device_name, wires=self.n_qubits)
+        """Load model parameters."""
+        checkpoint = torch.load(filepath, map_location='cpu')
+        self.q_params.data = checkpoint['q_params']
+        self.n_qubits = checkpoint['n_qubits']
+        self.n_layers = checkpoint['n_layers']
         print(f"Model loaded from {filepath}")
     
-    def draw_circuit(self, sample_features: np.ndarray) -> str:
-        """
-        Draw the quantum circuit for visualization.
-        
-        Args:
-            sample_features: Sample input features
-            
-        Returns:
-            String representation of the circuit
-        """
-        qnode = self.create_qnode()
-        return qml.draw(qnode)(sample_features, self.params)
-
-
-def compute_cost(qnn: QuantumNeuralNetwork, X: np.ndarray, y: np.ndarray):
-    """
-    Compute binary cross-entropy loss for the quantum model.
-    
-    Args:
-        qnn: Quantum neural network instance
-        X: Feature matrix
-        y: True labels
-        
-    Returns:
-        Average loss over all samples (maintains gradient tracking)
-    """
-    from pennylane import numpy as pnp
-    
-    total_loss = 0.0
-    epsilon = 1e-7  # For numerical stability
-    
-    for features, label in zip(X, y):
-        pred_prob = qnn.predict_proba(features)
-        # Binary cross-entropy (use pnp.log to maintain gradients)
-        loss = -(label * pnp.log(pred_prob + epsilon) + 
-                (1 - label) * pnp.log(1 - pred_prob + epsilon))
-        total_loss += loss
-    
-    # Return without converting to float (maintains gradient tracking)
-    return total_loss / len(X)
-
-
-def compute_accuracy(qnn: QuantumNeuralNetwork, X: np.ndarray, y: np.ndarray) -> float:
-    """
-    Compute classification accuracy.
-    
-    Args:
-        qnn: Quantum neural network instance
-        X: Feature matrix
-        y: True labels
-        
-    Returns:
-        Accuracy score (0 to 1)
-    """
-    predictions = qnn.predict_batch(X)
-    return np.mean(predictions == y)
+    def draw_circuit(self, sample_input):
+        """Draw the quantum circuit for visualization."""
+        return qml.draw(self.qnode)(sample_input, self.q_params.detach())
 
 
 if __name__ == "__main__":
-    """
-    Example usage and testing of the quantum model.
-    """
-    print("=" * 60)
-    print("Testing Quantum Neural Network")
-    print("=" * 60)
+    print("Testing Hybrid Quantum Model...")
     
-    # Create a simple QNN
-    n_features = 4
-    qnn = QuantumNeuralNetwork(n_qubits=n_features, n_layers=2)
+    # Create model
+    model = HybridQuantumModel(n_qubits=4, n_layers=3)
     
-    # Test with random data
-    print("\nTesting with random data...")
-    X_test = np.random.randn(5, n_features)
-    y_test = np.random.randint(0, 2, 5)
+    # Test with random input
+    x = torch.randn(2, 8)  # Batch of 2 samples, 8 features each
     
-    print(f"Input shape: {X_test.shape}")
-    print(f"Labels: {y_test}")
-    
-    # Make predictions
-    predictions = qnn.predict_batch(X_test)
-    print(f"Predictions: {predictions}")
-    
-    # Compute metrics
-    accuracy = compute_accuracy(qnn, X_test, y_test)
-    loss = compute_cost(qnn, X_test, y_test)
-    print(f"\nAccuracy: {accuracy:.4f}")
-    print(f"Loss: {loss:.4f}")
+    print(f"\nInput shape: {x.shape}")
+    output = model(x)
+    print(f"Output shape: {output.shape}")
+    print(f"Output values: {output.squeeze().detach().numpy()}")
     
     # Draw circuit
     print("\nQuantum Circuit:")
-    print(qnn.draw_circuit(X_test[0]))
-    
-    print("\n" + "=" * 60)
-    print("Quantum model ready!")
-    print("=" * 60)
+    print(model.draw_circuit(x[0].detach().numpy()))

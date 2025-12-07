@@ -1,289 +1,273 @@
 """
-Flask API Server for Quantum Fake News Detector
-===============================================
-RESTful API backend for the web interface.
+Flask API Server for Hybrid Quantum Fake News Detector
+======================================================
+Provides REST API endpoints for fake news detection.
 """
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import torch
 import numpy as np
 from pathlib import Path
-import json
-import time
+import sys
 
-from quantum_model import QuantumNeuralNetwork
-from data_preprocessing import TextPreprocessor
+from quantum_model import HybridQuantumModel
+from data_preprocessing import BERTPCAPreprocessor
 
+
+# Configuration
+N_QUBITS = 4
+N_LAYERS = 3
+N_FEATURES = 8
+MODEL_PATH = 'results/quantum_model.pth'
+PREPROCESSOR_PATH = 'results/preprocessor.pkl'
+
+# Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+CORS(app)
 
 # Global variables for model and preprocessor
-qnn = None
+model = None
 preprocessor = None
-model_info = {}
+device = None
 
-def load_model():
-    """Load the trained quantum model."""
-    global qnn, preprocessor, model_info
-    
-    # Try to load optimized model first, then high accuracy, then regular
-    model_paths = [
-        ('results/quantum_model_optimized.pkl', 'results/preprocessor_optimized.pkl', 'results/optimized_results.json', 8, 2),
-        ('results/quantum_model_high_accuracy.pkl', 'results/preprocessor_high_accuracy.pkl', 'results/high_accuracy_results.json', 16, 4),
-        ('results/quantum_model.pkl', 'results/preprocessor.pkl', 'results/metrics.json', 8, 3),
-    ]
-    
-    for model_path, prep_path, results_path, n_qubits, n_layers in model_paths:
-        if Path(model_path).exists() and Path(prep_path).exists():
-            print(f"Loading model from {model_path}...")
-            
-            qnn = QuantumNeuralNetwork(n_qubits=n_qubits, n_layers=n_layers)
-            qnn.load(model_path)
-            
-            preprocessor = TextPreprocessor(n_features=n_qubits)
-            preprocessor.load(prep_path)
-            
-            # Load model info
-            try:
-                with open(results_path, 'r') as f:
-                    results = json.load(f)
-                    model_info = {
-                        'accuracy': results.get('metrics', {}).get('accuracy', 0),
-                        'precision': results.get('metrics', {}).get('precision', 0),
-                        'recall': results.get('metrics', {}).get('recall', 0),
-                        'f1': results.get('metrics', {}).get('f1', 0),
-                        'qubits': n_qubits,
-                        'layers': n_layers,
-                        'model_type': 'Optimized' if 'optimized' in model_path else 'High Accuracy' if 'high_accuracy' in model_path else 'Standard'
-                    }
-            except:
-                model_info = {
-                    'accuracy': 0.85,
-                    'qubits': n_qubits,
-                    'layers': n_layers,
-                    'model_type': 'Standard'
-                }
-            
-            print(f"✓ Model loaded successfully!")
-            print(f"  Type: {model_info['model_type']}")
-            print(f"  Qubits: {n_qubits}, Layers: {n_layers}")
-            return True
-    
-    print("⚠️  No trained model found. Please train a model first.")
-    return False
 
-# Load model on startup
-model_loaded = load_model()
+def load_model_and_preprocessor():
+    """Load the trained model and preprocessor."""
+    global model, preprocessor, device
+    
+    print("Loading model and preprocessor...")
+    
+    # Check if files exist
+    if not Path(MODEL_PATH).exists():
+        print(f"ERROR: Model not found at {MODEL_PATH}")
+        print("Please run train.py first.")
+        sys.exit(1)
+    
+    if not Path(PREPROCESSOR_PATH).exists():
+        print(f"ERROR: Preprocessor not found at {PREPROCESSOR_PATH}")
+        print("Please run train.py first.")
+        sys.exit(1)
+    
+    # Load preprocessor
+    preprocessor = BERTPCAPreprocessor(n_components=N_FEATURES)
+    preprocessor.load(PREPROCESSOR_PATH)
+    
+    # Load model
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = HybridQuantumModel(n_qubits=N_QUBITS, n_layers=N_LAYERS)
+    model.load(MODEL_PATH)
+    model.to(device)
+    model.eval()
+    
+    print(f"Model loaded successfully on device: {device}")
 
+
+@app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
     return jsonify({
         'status': 'healthy',
-        'model_loaded': model_loaded,
-        'model_info': model_info if model_loaded else None
+        'model_loaded': model is not None,
+        'preprocessor_loaded': preprocessor is not None
     })
 
+
+@app.route('/predict', methods=['POST'])
 @app.route('/api/predict', methods=['POST'])
 def predict():
-    """Predict if news is fake or real."""
-    if not model_loaded:
-        return jsonify({
-            'error': 'Model not loaded. Please train a model first.'
-        }), 503
+    """
+    Predict if a news article is fake or real.
     
+    Request body:
+    {
+        "text": "News article text here..."
+    }
+    
+    Response:
+    {
+        "prediction": "FAKE" or "REAL",
+        "probability": 0.85,
+        "confidence": 0.85
+    }
+    """
     try:
+        # Get text from request
         data = request.get_json()
-        text = data.get('text', '').strip()
         
-        if not text:
-            return jsonify({'error': 'No text provided'}), 400
+        if not data or 'text' not in data:
+            return jsonify({
+                'error': 'Missing "text" field in request body'
+            }), 400
         
-        # Start timing
-        start_time = time.time()
+        text = data['text']
         
-        # Preprocess and predict
+        if not text or len(text.strip()) == 0:
+            return jsonify({
+                'error': 'Text cannot be empty'
+            }), 400
+        
+        # Preprocess text
         features = preprocessor.transform([text])
-        probability = qnn.predict_proba(features[0])
-        prediction = qnn.predict(features[0])
         
-        # Convert to float
-        prob_val = float(probability) if hasattr(probability, '__float__') else probability
+        # Convert to tensor
+        features_tensor = torch.FloatTensor(features).to(device)
         
-        # Calculate confidence
-        is_fake = prediction == 1
-        confidence = prob_val if is_fake else (1 - prob_val)
+        # Get prediction
+        with torch.no_grad():
+            prob = model(features_tensor).item()
         
-        # Processing time
-        processing_time = time.time() - start_time
-        
-        # Analyze text features
-        word_count = len(text.split())
-        has_exclamation = '!' in text
-        has_caps = any(word.isupper() for word in text.split() if len(word) > 2)
-        
-        # Determine risk level
-        if confidence >= 0.9:
-            risk_level = 'very_high' if is_fake else 'very_low'
-        elif confidence >= 0.75:
-            risk_level = 'high' if is_fake else 'low'
-        elif confidence >= 0.6:
-            risk_level = 'medium'
-        else:
-            risk_level = 'uncertain'
-        
-        # Generate explanation
-        explanation = []
-        if is_fake:
-            if has_exclamation:
-                explanation.append("Contains excessive exclamation marks")
-            if has_caps:
-                explanation.append("Uses sensational capitalization")
-            if any(word in text.lower() for word in ['shocking', 'breaking', 'miracle', 'secret']):
-                explanation.append("Contains clickbait keywords")
-        else:
-            if any(word in text.lower() for word in ['research', 'study', 'university', 'scientists']):
-                explanation.append("Contains academic/research language")
-            if any(word in text.lower() for word in ['government', 'officials', 'announces']):
-                explanation.append("Uses formal/official language")
+        # Interpret result
+        label = "FAKE" if prob > 0.5 else "REAL"
+        confidence = prob if label == "FAKE" else (1 - prob)
         
         return jsonify({
-            'prediction': 'fake' if is_fake else 'real',
-            'confidence': round(confidence * 100, 2),
-            'probability_fake': round(prob_val * 100, 2),
-            'probability_real': round((1 - prob_val) * 100, 2),
-            'risk_level': risk_level,
-            'explanation': explanation,
-            'analysis': {
-                'word_count': word_count,
-                'has_exclamation': has_exclamation,
-                'has_caps': has_caps,
-                'processing_time': round(processing_time * 1000, 2)  # ms
-            },
-            'model_info': model_info
+            'prediction': label,
+            'probability': float(prob),
+            'confidence': float(confidence),
+            'text_preview': text[:100] + '...' if len(text) > 100 else text
         })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/batch-predict', methods=['POST'])
-def batch_predict():
-    """Predict multiple texts at once."""
-    if not model_loaded:
         return jsonify({
-            'error': 'Model not loaded. Please train a model first.'
-        }), 503
+            'error': str(e)
+        }), 500
+
+
+@app.route('/batch_predict', methods=['POST'])
+@app.route('/api/batch_predict', methods=['POST'])
+def batch_predict():
+    """
+    Predict multiple news articles at once.
     
+    Request body:
+    {
+        "texts": ["Article 1...", "Article 2...", ...]
+    }
+    
+    Response:
+    {
+        "predictions": [
+            {"prediction": "FAKE", "probability": 0.85, "confidence": 0.85},
+            {"prediction": "REAL", "probability": 0.25, "confidence": 0.75},
+            ...
+        ]
+    }
+    """
     try:
+        # Get texts from request
         data = request.get_json()
-        texts = data.get('texts', [])
         
-        if not texts or not isinstance(texts, list):
-            return jsonify({'error': 'Invalid texts array'}), 400
+        if not data or 'texts' not in data:
+            return jsonify({
+                'error': 'Missing "texts" field in request body'
+            }), 400
         
+        texts = data['texts']
+        
+        if not isinstance(texts, list) or len(texts) == 0:
+            return jsonify({
+                'error': 'texts must be a non-empty list'
+            }), 400
+        
+        # Preprocess all texts
+        features = preprocessor.transform(texts)
+        
+        # Convert to tensor
+        features_tensor = torch.FloatTensor(features).to(device)
+        
+        # Get predictions
+        with torch.no_grad():
+            probs = model(features_tensor).cpu().numpy().flatten()
+        
+        # Format results
         results = []
-        for text in texts[:10]:  # Limit to 10 texts
-            if not text.strip():
-                continue
-            
-            features = preprocessor.transform([text])
-            probability = qnn.predict_proba(features[0])
-            prediction = qnn.predict(features[0])
-            
-            prob_val = float(probability) if hasattr(probability, '__float__') else probability
-            is_fake = prediction == 1
-            confidence = prob_val if is_fake else (1 - prob_val)
-            
+        for prob in probs:
+            label = "FAKE" if prob > 0.5 else "REAL"
+            confidence = prob if label == "FAKE" else (1 - prob)
             results.append({
-                'text': text[:100] + '...' if len(text) > 100 else text,
-                'prediction': 'fake' if is_fake else 'real',
-                'confidence': round(confidence * 100, 2)
+                'prediction': label,
+                'probability': float(prob),
+                'confidence': float(confidence)
             })
         
         return jsonify({
-            'results': results,
-            'total': len(results)
+            'predictions': results,
+            'count': len(results)
         })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+
+@app.route('/model_info', methods=['GET'])
+@app.route('/api/model_info', methods=['GET'])
+@app.route('/api/stats', methods=['GET'])
+def model_info():
+    """Get information about the loaded model."""
+    return jsonify({
+        'n_qubits': N_QUBITS,
+        'n_layers': N_LAYERS,
+        'n_features': N_FEATURES,
+        'device': str(device),
+        'model_path': MODEL_PATH,
+        'preprocessor_path': PREPROCESSOR_PATH,
+        'total_predictions': 0,
+        'accuracy': 0.0
+    })
+
 
 @app.route('/api/examples', methods=['GET'])
 def get_examples():
     """Get example news articles for testing."""
     examples = [
         {
-            'text': "Scientists at MIT publish peer-reviewed research on quantum computing advances in Nature journal.",
-            'expected': 'real',
-            'category': 'Academic'
+            'id': 1,
+            'text': 'Suspected toxic gas leak in Dhanbad kills two, several hospitalized',
+            'label': 'Real News'
         },
         {
-            'text': "BREAKING: Aliens confirmed by government officials! They've been living among us for decades!",
-            'expected': 'fake',
-            'category': 'Conspiracy'
+            'id': 2,
+            'text': 'Scientists discover water on Mars, confirming potential for life',
+            'label': 'Real News'
         },
         {
-            'text': "You won't believe this one weird trick that doctors don't want you to know! Click here now!",
-            'expected': 'fake',
-            'category': 'Clickbait'
+            'id': 3,
+            'text': 'BREAKING: Pope Francis endorses Donald Trump for President!',
+            'label': 'Fake News'
         },
         {
-            'text': "Federal Reserve announces interest rate decision following comprehensive economic analysis.",
-            'expected': 'real',
-            'category': 'Economic'
+            'id': 4,
+            'text': 'Government passes new tax bill affecting small businesses',
+            'label': 'Real News'
         },
         {
-            'text': "Man claims he spoke to aliens and they revealed the secret to eternal life!",
-            'expected': 'fake',
-            'category': 'Sensational'
-        },
-        {
-            'text': "Government announces new infrastructure bill after months of bipartisan negotiations.",
-            'expected': 'real',
-            'category': 'Political'
+            'id': 5,
+            'text': 'You won\'t believe what this celebrity did! Doctors hate this one trick!',
+            'label': 'Fake News'
         }
     ]
-    
     return jsonify({'examples': examples})
 
-@app.route('/api/stats', methods=['GET'])
-def get_stats():
-    """Get model statistics."""
-    if not model_loaded:
-        return jsonify({'error': 'Model not loaded'}), 503
-    
-    return jsonify({
-        'model_info': model_info,
-        'quantum_specs': {
-            'qubits': model_info.get('qubits', 8),
-            'layers': model_info.get('layers', 2),
-            'parameters': model_info.get('qubits', 8) * model_info.get('layers', 2) * 3,
-            'device': 'Quantum Simulator'
-        },
-        'performance': {
-            'accuracy': round(model_info.get('accuracy', 0.85) * 100, 2),
-            'precision': round(model_info.get('precision', 0.85) * 100, 2),
-            'recall': round(model_info.get('recall', 0.85) * 100, 2),
-            'f1_score': round(model_info.get('f1', 0.85) * 100, 2)
-        }
-    })
 
 if __name__ == '__main__':
-    print("\n" + "=" * 70)
-    print("QUANTUM FAKE NEWS DETECTOR - API SERVER")
-    print("=" * 70)
+    print("=" * 60)
+    print("HYBRID QUANTUM FAKE NEWS DETECTOR - API SERVER")
+    print("=" * 60)
     
-    if model_loaded:
-        print("\n✓ Model loaded successfully!")
-        print(f"  Type: {model_info['model_type']}")
-        print(f"  Accuracy: {model_info.get('accuracy', 0)*100:.1f}%")
-    else:
-        print("\n⚠️  No model loaded. Train a model first:")
-        print("  python train_optimized_fast.py")
+    # Load model and preprocessor
+    load_model_and_preprocessor()
     
-    print("\n🚀 Starting API server...")
-    print("   API will be available at: http://localhost:5000")
-    print("   Frontend should connect to this URL")
-    print("\n" + "=" * 70 + "\n")
+    print("\nStarting Flask server...")
+    print("API Endpoints:")
+    print("  GET  /health          - Health check")
+    print("  POST /predict         - Predict single article")
+    print("  POST /batch_predict   - Predict multiple articles")
+    print("  GET  /model_info      - Model information")
+    print("\n" + "=" * 60)
     
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # Run server
+    app.run(host='0.0.0.0', port=5000, debug=False)

@@ -1,57 +1,72 @@
 """
-Training and Evaluation Script for Quantum Fake News Detector
-=============================================================
-This module handles training the quantum neural network and evaluating performance.
+Training Script for Hybrid Classical-Quantum Fake News Detector
+================================================================
+Implements strict paper specifications:
+- Binary Cross Entropy loss
+- Adam optimizer with lr=0.001
+- Batch size=32
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
-from typing import Tuple, List, Dict
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, classification_report
 )
 from tqdm import tqdm
-import pennylane as qml
-from pennylane import numpy as pnp
 
-from quantum_model import QuantumNeuralNetwork, compute_cost, compute_accuracy
+from quantum_model import HybridQuantumModel
 from data_preprocessing import prepare_dataset
 
 
-class QuantumTrainer:
+# ==========================================
+# CONFIGURATION (Paper Specifications)
+# ==========================================
+DATASET_PATH = '/content/drive/MyDrive/datasets/WELFake_Dataset.csv'
+SAMPLE_SIZE = 5000  # Reduced for faster training on Colab
+N_FEATURES = 8  # After PCA
+N_QUBITS = 4  # Paper specification
+N_LAYERS = 3  # Paper specification
+BATCH_SIZE = 32  # Paper specification
+LEARNING_RATE = 0.001  # Paper specification
+EPOCHS = 20
+RANDOM_STATE = 42
+
+
+class Trainer:
     """
-    Trainer class for quantum neural network with optimization and tracking.
+    Trainer for hybrid quantum model.
     """
     
     def __init__(
         self,
-        qnn: QuantumNeuralNetwork,
-        learning_rate: float = 0.01,
-        optimizer: str = 'adam'
+        model: HybridQuantumModel,
+        learning_rate: float = 0.001,
+        device: str = 'cpu'
     ):
         """
-        Initialize the trainer.
+        Initialize trainer.
         
         Args:
-            qnn: Quantum neural network to train
-            learning_rate: Learning rate for optimization
-            optimizer: Optimizer type ('adam', 'sgd', 'adagrad')
+            model: Hybrid quantum model
+            learning_rate: Learning rate for Adam optimizer
+            device: Device to train on ('cpu' or 'cuda')
         """
-        self.qnn = qnn
-        self.learning_rate = learning_rate
+        self.model = model
+        self.device = device
+        self.model.to(device)
         
-        # Initialize PennyLane optimizer
-        if optimizer.lower() == 'adam':
-            self.opt = qml.AdamOptimizer(stepsize=learning_rate)
-        elif optimizer.lower() == 'sgd':
-            self.opt = qml.GradientDescentOptimizer(stepsize=learning_rate)
-        elif optimizer.lower() == 'adagrad':
-            self.opt = qml.AdagradOptimizer(stepsize=learning_rate)
-        else:
-            raise ValueError(f"Unknown optimizer: {optimizer}")
+        # Binary Cross Entropy loss
+        self.criterion = nn.BCELoss()
+        
+        # Adam optimizer
+        self.optimizer = optim.Adam(model.parameters(), lr=learning_rate)
         
         # Training history
         self.history = {
@@ -61,128 +76,98 @@ class QuantumTrainer:
             'val_acc': []
         }
         
-        print(f"Trainer initialized with {optimizer} optimizer (lr={learning_rate})")
+        print(f"Trainer initialized:")
+        print(f"  Optimizer: Adam (lr={learning_rate})")
+        print(f"  Loss: Binary Cross Entropy")
+        print(f"  Device: {device}")
     
-    def compute_gradient_cost(self, params: np.ndarray, X: np.ndarray, y: np.ndarray) -> float:
-        """
-        Cost function for gradient computation.
+    def train_epoch(self, train_loader: DataLoader) -> tuple:
+        """Train for one epoch."""
+        self.model.train()
         
-        Args:
-            params: Current parameters
-            X: Training features
-            y: Training labels
+        epoch_loss = 0.0
+        all_preds = []
+        all_labels = []
+        
+        pbar = tqdm(train_loader, desc="Training")
+        for batch_x, batch_y in pbar:
+            batch_x = batch_x.to(self.device)
+            batch_y = batch_y.to(self.device).float().unsqueeze(1)
             
-        Returns:
-            Average loss
-        """
-        # Temporarily set parameters
-        old_params = self.qnn.get_params()
-        self.qnn.set_params(params)
-        
-        # Compute cost
-        cost = compute_cost(self.qnn, X, y)
-        
-        # Restore parameters
-        self.qnn.set_params(old_params)
-        
-        return cost
-    
-    def train_epoch(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        batch_size: int = 10
-    ) -> Tuple[float, float]:
-        """
-        Train for one epoch.
-        
-        Args:
-            X_train: Training features
-            y_train: Training labels
-            batch_size: Number of samples per batch
+            # Forward pass
+            self.optimizer.zero_grad()
+            outputs = self.model(batch_x)
             
-        Returns:
-            Tuple of (average_loss, accuracy)
-        """
-        n_samples = len(X_train)
-        indices = np.random.permutation(n_samples)
-        
-        epoch_losses = []
-        
-        # Process in batches
-        for i in range(0, n_samples, batch_size):
-            batch_indices = indices[i:min(i + batch_size, n_samples)]
-            X_batch = X_train[batch_indices]
-            y_batch = y_train[batch_indices]
+            # Compute loss
+            loss = self.criterion(outputs, batch_y)
             
-            # Define cost function for this batch
-            def cost_fn(params):
-                self.qnn.set_params(params)
-                return compute_cost(self.qnn, X_batch, y_batch)
+            # Backward pass
+            loss.backward()
+            self.optimizer.step()
             
-            # Perform optimization step
-            from pennylane import numpy as pnp
-            params = pnp.array(self.qnn.get_params(), requires_grad=True)
-            params, cost = self.opt.step_and_cost(cost_fn, params)
-            self.qnn.set_params(params)
+            # Track metrics
+            epoch_loss += loss.item()
+            preds = (outputs > 0.5).float()
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(batch_y.cpu().numpy())
             
-            epoch_losses.append(cost)
+            pbar.set_postfix({'loss': loss.item()})
         
-        # Compute metrics on full training set
-        avg_loss = np.mean(epoch_losses)
-        accuracy = compute_accuracy(self.qnn, X_train, y_train)
+        avg_loss = epoch_loss / len(train_loader)
+        accuracy = accuracy_score(all_labels, all_preds)
         
         return avg_loss, accuracy
     
-    def evaluate(self, X: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
-        """
-        Evaluate model on a dataset.
+    def evaluate(self, val_loader: DataLoader) -> tuple:
+        """Evaluate model on validation set."""
+        self.model.eval()
         
-        Args:
-            X: Features
-            y: Labels
-            
-        Returns:
-            Tuple of (loss, accuracy)
-        """
-        loss = compute_cost(self.qnn, X, y)
-        accuracy = compute_accuracy(self.qnn, X, y)
-        return loss, accuracy
+        epoch_loss = 0.0
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for batch_x, batch_y in tqdm(val_loader, desc="Evaluating"):
+                batch_x = batch_x.to(self.device)
+                batch_y = batch_y.to(self.device).float().unsqueeze(1)
+                
+                # Forward pass
+                outputs = self.model(batch_x)
+                
+                # Compute loss
+                loss = self.criterion(outputs, batch_y)
+                
+                # Track metrics
+                epoch_loss += loss.item()
+                preds = (outputs > 0.5).float()
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(batch_y.cpu().numpy())
+        
+        avg_loss = epoch_loss / len(val_loader)
+        accuracy = accuracy_score(all_labels, all_preds)
+        
+        return avg_loss, accuracy
     
     def train(
         self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-        epochs: int = 50,
-        batch_size: int = 10,
-        verbose: bool = True
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        epochs: int = 20
     ):
-        """
-        Train the quantum neural network.
-        
-        Args:
-            X_train: Training features
-            y_train: Training labels
-            X_val: Validation features
-            y_val: Validation labels
-            epochs: Number of training epochs
-            batch_size: Batch size for training
-            verbose: Whether to print progress
-        """
+        """Train the model."""
         print(f"\nStarting training for {epochs} epochs...")
-        print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
         
         best_val_acc = 0.0
-        best_params = None
+        best_model_state = None
         
-        for epoch in tqdm(range(epochs), desc="Training"):
-            # Train one epoch
-            train_loss, train_acc = self.train_epoch(X_train, y_train, batch_size)
+        for epoch in range(epochs):
+            print(f"\nEpoch {epoch + 1}/{epochs}")
             
-            # Evaluate on validation set
-            val_loss, val_acc = self.evaluate(X_val, y_val)
+            # Train
+            train_loss, train_acc = self.train_epoch(train_loader)
+            
+            # Validate
+            val_loss, val_acc = self.evaluate(val_loader)
             
             # Save history
             self.history['train_loss'].append(train_loss)
@@ -193,31 +178,23 @@ class QuantumTrainer:
             # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                best_params = self.qnn.get_params()
+                best_model_state = self.model.state_dict()
             
-            # Print progress
-            if verbose and (epoch + 1) % 10 == 0:
-                print(f"\nEpoch {epoch + 1}/{epochs}:")
-                print(f"  Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-                print(f"  Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
+            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
         
-        # Restore best parameters
-        if best_params is not None:
-            self.qnn.set_params(best_params)
+        # Load best model
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
             print(f"\nBest validation accuracy: {best_val_acc:.4f}")
     
     def plot_training_history(self, save_path: str = None):
-        """
-        Plot training and validation metrics.
-        
-        Args:
-            save_path: Optional path to save the plot
-        """
+        """Plot training curves."""
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
         
         epochs = range(1, len(self.history['train_loss']) + 1)
         
-        # Plot loss
+        # Loss plot
         ax1.plot(epochs, self.history['train_loss'], 'b-', label='Training Loss', linewidth=2)
         ax1.plot(epochs, self.history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
         ax1.set_xlabel('Epoch', fontsize=12)
@@ -226,7 +203,7 @@ class QuantumTrainer:
         ax1.legend(fontsize=10)
         ax1.grid(True, alpha=0.3)
         
-        # Plot accuracy
+        # Accuracy plot
         ax2.plot(epochs, self.history['train_acc'], 'b-', label='Training Accuracy', linewidth=2)
         ax2.plot(epochs, self.history['val_acc'], 'r-', label='Validation Accuracy', linewidth=2)
         ax2.set_xlabel('Epoch', fontsize=12)
@@ -239,218 +216,149 @@ class QuantumTrainer:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Training history plot saved to {save_path}")
+            print(f"Training history saved to {save_path}")
         
         plt.show()
 
 
-def evaluate_model(
-    qnn: QuantumNeuralNetwork,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-    save_dir: str = 'results'
-) -> Dict[str, float]:
-    """
-    Comprehensive evaluation of the trained model.
+def evaluate_model(model, test_loader, device, save_dir):
+    """Evaluate model on test set."""
+    print("\nEvaluating on test set...")
     
-    Args:
-        qnn: Trained quantum neural network
-        X_test: Test features
-        y_test: Test labels
-        save_dir: Directory to save evaluation results
-        
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    print("\n" + "=" * 60)
-    print("Evaluating Model on Test Set")
-    print("=" * 60)
+    model.eval()
+    all_preds = []
+    all_labels = []
+    all_probs = []
     
-    # Make predictions
-    print("Making predictions...")
-    y_pred = qnn.predict_batch(X_test)
-    y_proba = np.array([qnn.predict_proba(x) for x in X_test])
+    with torch.no_grad():
+        for batch_x, batch_y in tqdm(test_loader, desc="Testing"):
+            batch_x = batch_x.to(device)
+            outputs = model(batch_x)
+            
+            probs = outputs.cpu().numpy()
+            preds = (outputs > 0.5).float().cpu().numpy()
+            
+            all_probs.extend(probs)
+            all_preds.extend(preds)
+            all_labels.extend(batch_y.numpy())
+    
+    # Flatten arrays
+    all_preds = np.array(all_preds).flatten()
+    all_labels = np.array(all_labels).flatten()
     
     # Compute metrics
     metrics = {
-        'accuracy': accuracy_score(y_test, y_pred),
-        'precision': precision_score(y_test, y_pred, zero_division=0),
-        'recall': recall_score(y_test, y_pred, zero_division=0),
-        'f1': f1_score(y_test, y_pred, zero_division=0)
+        'accuracy': accuracy_score(all_labels, all_preds),
+        'precision': precision_score(all_labels, all_preds, zero_division=0),
+        'recall': recall_score(all_labels, all_preds, zero_division=0),
+        'f1': f1_score(all_labels, all_preds, zero_division=0)
     }
     
-    # Print metrics
-    print("\nTest Set Performance:")
-    print(f"  Accuracy:  {metrics['accuracy']:.4f}")
-    print(f"  Precision: {metrics['precision']:.4f}")
-    print(f"  Recall:    {metrics['recall']:.4f}")
-    print(f"  F1-Score:  {metrics['f1']:.4f}")
+    print(f"\nTest Results:")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    print(f"F1-Score: {metrics['f1']:.4f}")
     
-    # Classification report
-    print("\nDetailed Classification Report:")
-    print(classification_report(y_test, y_pred, target_names=['Real', 'Fake']))
+    print("\nClassification Report:")
+    print(classification_report(all_labels, all_preds, target_names=['Real', 'Fake']))
     
     # Confusion matrix
-    cm = confusion_matrix(y_test, y_pred)
-    
-    # Plot confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=['Real', 'Fake'],
-                yticklabels=['Real', 'Fake'],
-                cbar_kws={'label': 'Count'})
-    plt.xlabel('Predicted Label', fontsize=12)
-    plt.ylabel('True Label', fontsize=12)
-    plt.title('Confusion Matrix - Quantum Fake News Detector', fontsize=14, fontweight='bold')
-    
-    # Save confusion matrix
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    cm_path = Path(save_dir) / 'confusion_matrix.png'
-    plt.savefig(cm_path, dpi=300, bbox_inches='tight')
-    print(f"\nConfusion matrix saved to {cm_path}")
+                xticklabels=['Real', 'Fake'], yticklabels=['Real', 'Fake'])
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.title('Confusion Matrix')
+    plt.savefig(f"{save_dir}/confusion_matrix.png", dpi=300, bbox_inches='tight')
     plt.show()
     
     return metrics
 
 
 def main():
-    """
-    Main training pipeline.
-    """
-    print("=" * 60)
-    print("QUANTUM FAKE NEWS DETECTION - TRAINING PIPELINE")
-    print("=" * 60)
-    
-    # Configuration
-    DATASET_PATH = 'data/Enhanced_FakeNews_Dataset.csv'  # Update this path
-    DATASET_TYPE = 'welfake'  # or 'liar'
-    N_FEATURES = 8  # Number of quantum features
-    N_QUBITS = 8  # Should match n_features
-    N_LAYERS = 3  # Number of variational layers
-    EPOCHS = 50
-    BATCH_SIZE = 10
-    LEARNING_RATE = 0.01
-    SAMPLE_SIZE = None  # Use subset for faster training (set to None for full dataset)
+    print("=" * 70)
+    print("HYBRID CLASSICAL-QUANTUM FAKE NEWS DETECTION - TRAINING PIPELINE")
+    print("=" * 70)
     
     # Create results directory
     results_dir = Path('results')
     results_dir.mkdir(exist_ok=True)
     
-    # Step 1: Load and preprocess data
-    print("\n" + "=" * 60)
-    print("STEP 1: Data Preprocessing")
-    print("=" * 60)
+    # Step 1: Data Preprocessing
+    print("\n[STEP 1] Data Preprocessing (BERT + PCA)")
+    print(f"Dataset: {DATASET_PATH}")
+    print(f"Sample size: {SAMPLE_SIZE}")
     
     try:
         X_train, X_test, y_train, y_test, preprocessor = prepare_dataset(
             dataset_path=DATASET_PATH,
-            dataset_type=DATASET_TYPE,
             n_features=N_FEATURES,
-            sample_size=SAMPLE_SIZE
+            sample_size=SAMPLE_SIZE,
+            random_state=RANDOM_STATE
         )
         
         # Save preprocessor
         preprocessor.save('results/preprocessor.pkl')
         
     except FileNotFoundError:
-        print(f"\nDataset not found at {DATASET_PATH}")
-        print("Using synthetic data for demonstration...")
-        
-        # Generate synthetic data
-        np.random.seed(42)
-        n_samples = 200
-        X_train = np.random.randn(int(n_samples * 0.8), N_FEATURES)
-        X_test = np.random.randn(int(n_samples * 0.2), N_FEATURES)
-        y_train = np.random.randint(0, 2, int(n_samples * 0.8))
-        y_test = np.random.randint(0, 2, int(n_samples * 0.2))
-        
-        print(f"Generated synthetic dataset:")
-        print(f"  Training samples: {len(X_train)}")
-        print(f"  Test samples: {len(X_test)}")
-        
-        # Create a dummy preprocessor for synthetic data
-        # This allows the demo to work with the trained model
-        print("\nCreating preprocessor for synthetic data...")
-        from data_preprocessing import TextPreprocessor
-        preprocessor = TextPreprocessor(n_features=N_FEATURES)
-        
-        # Fit on some dummy text data so it can be used later
-        dummy_texts = [
-            "This is a sample real news article about science and technology.",
-            "FAKE NEWS ALERT! You won't believe this shocking revelation!",
-            "Government officials announce new policy regarding infrastructure.",
-            "Amazing miracle cure discovered! Doctors hate this one trick!",
-        ]
-        dummy_labels = np.array([0, 1, 0, 1])
-        preprocessor.fit_transform(dummy_texts, dummy_labels)
-        
-        # Save the preprocessor
-        preprocessor.save('results/preprocessor.pkl')
-        print("✓ Preprocessor saved")
+        print(f"ERROR: Dataset not found at {DATASET_PATH}")
+        print("Please update DATASET_PATH in train.py")
+        return
     
-    # Step 2: Create quantum model
-    print("\n" + "=" * 60)
-    print("STEP 2: Quantum Model Initialization")
-    print("=" * 60)
+    # Convert to PyTorch tensors
+    X_train_tensor = torch.FloatTensor(X_train)
+    y_train_tensor = torch.LongTensor(y_train)
+    X_test_tensor = torch.FloatTensor(X_test)
+    y_test_tensor = torch.LongTensor(y_test)
     
-    qnn = QuantumNeuralNetwork(
-        n_qubits=N_QUBITS,
-        n_layers=N_LAYERS
-    )
+    # Create data loaders
+    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
     
-    # Display sample circuit
-    print("\nSample Quantum Circuit:")
-    print(qnn.draw_circuit(X_train[0]))
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    # Step 3: Train the model
-    print("\n" + "=" * 60)
-    print("STEP 3: Training")
-    print("=" * 60)
+    print(f"\nData loaders created:")
+    print(f"  Train batches: {len(train_loader)}")
+    print(f"  Test batches: {len(test_loader)}")
     
-    trainer = QuantumTrainer(qnn, learning_rate=LEARNING_RATE, optimizer='adam')
+    # Step 2: Model Initialization
+    print("\n[STEP 2] Hybrid Quantum Model Initialization")
     
-    trainer.train(
-        X_train=X_train,
-        y_train=y_train,
-        X_val=X_test,
-        y_val=y_test,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        verbose=True
-    )
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    model = HybridQuantumModel(n_qubits=N_QUBITS, n_layers=N_LAYERS)
+    
+    # Draw circuit
+    print("\nQuantum Circuit:")
+    print(model.draw_circuit(X_train[0]))
+    
+    # Step 3: Training
+    print("\n[STEP 3] Training")
+    
+    trainer = Trainer(model, learning_rate=LEARNING_RATE, device=device)
+    trainer.train(train_loader, test_loader, epochs=EPOCHS)
     
     # Plot training history
     trainer.plot_training_history(save_path='results/training_history.png')
     
-    # Step 4: Evaluate the model
-    print("\n" + "=" * 60)
-    print("STEP 4: Evaluation")
-    print("=" * 60)
+    # Step 4: Evaluation
+    print("\n[STEP 4] Final Evaluation")
+    metrics = evaluate_model(model, test_loader, device, save_dir='results')
     
-    metrics = evaluate_model(qnn, X_test, y_test, save_dir='results')
+    # Step 5: Save Model
+    print("\n[STEP 5] Saving Model")
+    model.save('results/quantum_model.pth')
     
-    # Step 5: Save the trained model
-    print("\n" + "=" * 60)
-    print("STEP 5: Saving Model")
-    print("=" * 60)
-    
-    qnn.save('results/quantum_model.pkl')
-    
-    # Save metrics
-    import json
-    with open('results/metrics.json', 'w') as f:
-        json.dump(metrics, f, indent=2)
-    print("Metrics saved to results/metrics.json")
-    
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("TRAINING COMPLETE!")
-    print("=" * 60)
-    print(f"\nResults saved in '{results_dir}' directory:")
-    print("  - quantum_model.pkl (trained model)")
-    print("  - preprocessor.pkl (text preprocessor)")
-    print("  - training_history.png (loss and accuracy curves)")
-    print("  - confusion_matrix.png (test set confusion matrix)")
-    print("  - metrics.json (evaluation metrics)")
+    print("=" * 70)
+    print(f"Model saved to: results/quantum_model.pth")
+    print(f"Preprocessor saved to: results/preprocessor.pkl")
+    print(f"Final Test Accuracy: {metrics['accuracy']:.4f}")
 
 
 if __name__ == "__main__":
