@@ -7,6 +7,7 @@ Implements the strict pipeline: BERT Tokenization -> BERT Embeddings ([CLS]) -> 
 import pandas as pd
 import numpy as np
 import torch
+import os
 from transformers import BertTokenizer, BertModel
 from sklearn.decomposition import PCA
 from sklearn.model_selection import train_test_split
@@ -15,6 +16,45 @@ from typing import Tuple, Optional
 import pickle
 from tqdm import tqdm
 
+# --- [FIX] Helper Function to Auto-Detect Path ---
+def resolve_dataset_path(provided_path: str) -> str:
+    """
+    Smart logic to find the dataset regardless of what path is passed.
+    Prioritizes AWS Cloud path, then Local standard path, then the provided path.
+    """
+    filename = os.path.basename(provided_path) # Extracts "WELFake_Dataset.csv"
+    
+    # 1. Check AWS Cloud Environment
+    # AWS Braket sets this variable automatically
+    aws_input_dir = os.environ.get("AMZN_BRAKET_INPUT_DIR")
+    
+    if aws_input_dir:
+        # We are in the cloud. Ignore the provided path (e.g. drive/MyDrive).
+        # We look in the 'dataset' channel we defined in submit_job.py
+        cloud_path = os.path.join(aws_input_dir, "dataset", filename)
+        
+        if os.path.exists(cloud_path):
+            print(f"☁️ CLOUD MODE: Overriding path. Loading from {cloud_path}")
+            return cloud_path
+        else:
+            # Debugging helper: If file is missing, list what IS there
+            print(f"⚠️ Warning: Cloud path {cloud_path} not found. Checking directory...")
+            for root, dirs, files in os.walk(aws_input_dir):
+                print(f"  Found in {root}: {files}")
+            
+    # 2. Check Local Standard Path (Good for local testing)
+    local_path = os.path.join("data", filename)
+    if os.path.exists(local_path):
+        print(f"💻 LOCAL MODE: Found dataset at {local_path}")
+        return local_path
+        
+    # 3. Fallback: Trust the user provided path (e.g. absolute path)
+    if os.path.exists(provided_path):
+        return provided_path
+
+    # If we get here, we can't find it. Return provided_path so pandas throws the error.
+    return provided_path
+# ---------------------------------------------------
 
 class BERTPCAPreprocessor:
     """
@@ -26,13 +66,6 @@ class BERTPCAPreprocessor:
     """
     
     def __init__(self, n_components: int = 8, max_length: int = 512):
-        """
-        Initialize preprocessor.
-        
-        Args:
-            n_components: Target dimensions after PCA (default: 8)
-            max_length: Max sequence length for BERT (default: 512)
-        """
         self.n_components = n_components
         self.max_length = max_length
         
@@ -47,27 +80,16 @@ class BERTPCAPreprocessor:
         self.bert_model.to(self.device)
         print(f"BERT model loaded on device: {self.device}")
         
-        # PCA will be fitted later
         self.pca = None
         
     def extract_bert_embeddings(self, texts: list, batch_size: int = 16) -> np.ndarray:
-        """
-        Extract [CLS] token embeddings from BERT for a list of texts.
-        
-        Args:
-            texts: List of text strings
-            batch_size: Batch size for processing
-            
-        Returns:
-            Array of shape (n_samples, 768) containing [CLS] embeddings
-        """
         embeddings = []
         
         with torch.no_grad():
             for i in tqdm(range(0, len(texts), batch_size), desc="Extracting BERT embeddings"):
                 batch_texts = texts[i:i + batch_size]
                 
-                # Tokenize with padding and truncation
+                # Tokenize
                 encoded = self.tokenizer(
                     batch_texts,
                     padding=True,
@@ -83,30 +105,18 @@ class BERTPCAPreprocessor:
                 # Get BERT outputs
                 outputs = self.bert_model(input_ids=input_ids, attention_mask=attention_mask)
                 
-                # Extract [CLS] token (first token) from last hidden state
+                # Extract [CLS] token
                 cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
                 embeddings.append(cls_embeddings)
         
         return np.vstack(embeddings)
     
     def fit_transform(self, texts: list, labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Fit PCA and transform texts to quantum-ready features.
-        
-        Args:
-            texts: List of text documents
-            labels: Array of labels (0 or 1)
-            
-        Returns:
-            Tuple of (features, labels) as numpy arrays
-        """
         print(f"\nProcessing {len(texts)} samples...")
         
-        # Step 1: Extract BERT embeddings (768-dim)
         bert_embeddings = self.extract_bert_embeddings(texts)
         print(f"BERT embeddings shape: {bert_embeddings.shape}")
         
-        # Step 2: Fit PCA and reduce to n_components dimensions
         print(f"Fitting PCA to reduce from 768 to {self.n_components} dimensions...")
         self.pca = PCA(n_components=self.n_components)
         reduced_features = self.pca.fit_transform(bert_embeddings)
@@ -114,39 +124,21 @@ class BERTPCAPreprocessor:
         explained_variance = sum(self.pca.explained_variance_ratio_) * 100
         print(f"PCA explained variance: {explained_variance:.2f}%")
         
-        # Step 3: L2 normalization (unit norm)
         normalized_features = normalize(reduced_features, norm='l2', axis=1)
-        print(f"Final features shape: {normalized_features.shape}")
-        print(f"Feature range: [{normalized_features.min():.4f}, {normalized_features.max():.4f}]")
         
         return normalized_features, labels
     
     def transform(self, texts: list) -> np.ndarray:
-        """
-        Transform new texts using fitted PCA.
-        
-        Args:
-            texts: List of text documents
-            
-        Returns:
-            Transformed and normalized features
-        """
         if self.pca is None:
             raise ValueError("PCA not fitted. Call fit_transform first.")
         
-        # Extract BERT embeddings
         bert_embeddings = self.extract_bert_embeddings(texts)
-        
-        # Apply PCA transformation
         reduced_features = self.pca.transform(bert_embeddings)
-        
-        # L2 normalization
         normalized_features = normalize(reduced_features, norm='l2', axis=1)
         
         return normalized_features
     
     def save(self, filepath: str):
-        """Save the fitted preprocessor (PCA only, BERT is reloaded)."""
         if self.pca is None:
             raise ValueError("PCA not fitted. Nothing to save.")
         
@@ -159,7 +151,6 @@ class BERTPCAPreprocessor:
         print(f"Preprocessor saved to {filepath}")
     
     def load(self, filepath: str):
-        """Load a fitted preprocessor."""
         with open(filepath, 'rb') as f:
             data = pickle.load(f)
             self.pca = data['pca']
@@ -169,20 +160,14 @@ class BERTPCAPreprocessor:
 
 
 def load_welfake_dataset(filepath: str, sample_size: Optional[int] = None) -> Tuple[list, np.ndarray]:
-    """
-    Load the WELFake dataset.
+    """Load the WELFake dataset with smart path resolution."""
     
-    Args:
-        filepath: Path to the WELFake CSV file
-        sample_size: Optional limit on number of samples
-        
-    Returns:
-        Tuple of (texts, labels)
-    """
-    print(f"Loading WELFake dataset from {filepath}...")
-    df = pd.read_csv(filepath)
+    # [FIX] Use the smart resolver to find the real file
+    actual_path = resolve_dataset_path(filepath)
     
-    # Combine title and text
+    print(f"Loading WELFake dataset from {actual_path}...")
+    df = pd.read_csv(actual_path)
+    
     if 'title' in df.columns and 'text' in df.columns:
         texts = (df['title'].fillna('') + ' ' + df['text'].fillna('')).tolist()
     elif 'text' in df.columns:
@@ -192,7 +177,6 @@ def load_welfake_dataset(filepath: str, sample_size: Optional[int] = None) -> Tu
     
     labels = df['label'].values
     
-    # Sample if requested
     if sample_size and sample_size < len(texts):
         print(f"Sampling {sample_size} examples...")
         indices = np.random.choice(len(texts), sample_size, replace=False)
@@ -200,7 +184,6 @@ def load_welfake_dataset(filepath: str, sample_size: Optional[int] = None) -> Tu
         labels = labels[indices]
     
     print(f"Loaded {len(texts)} samples")
-    print(f"Label distribution: Real={sum(labels==0)}, Fake={sum(labels==1)}")
     
     return texts, labels
 
@@ -212,57 +195,22 @@ def prepare_dataset(
     random_state: int = 42,
     sample_size: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, BERTPCAPreprocessor]:
-    """
-    Complete preprocessing pipeline.
     
-    Args:
-        dataset_path: Path to WELFake dataset
-        n_features: Number of features after PCA (default: 8)
-        test_size: Test split ratio
-        random_state: Random seed
-        sample_size: Optional sample limit
-        
-    Returns:
-        Tuple of (X_train, X_test, y_train, y_test, preprocessor)
-    """
-    # Load dataset
+    # Load dataset (path will be auto-corrected inside load_welfake_dataset)
     texts, labels = load_welfake_dataset(dataset_path, sample_size)
     
-    # Split before preprocessing to avoid data leakage
     texts_train, texts_test, y_train, y_test = train_test_split(
         texts, labels, test_size=test_size, random_state=random_state, stratify=labels
     )
     
-    # Initialize preprocessor
     preprocessor = BERTPCAPreprocessor(n_components=n_features)
-    
-    # Fit on training data and transform
     X_train, y_train = preprocessor.fit_transform(texts_train, y_train)
-    
-    # Transform test data
     X_test = preprocessor.transform(texts_test)
-    
-    print(f"\nDataset prepared:")
-    print(f"  Training samples: {len(X_train)}")
-    print(f"  Test samples: {len(X_test)}")
-    print(f"  Features per sample: {X_train.shape[1]}")
     
     return X_train, X_test, y_train, y_test, preprocessor
 
-
 if __name__ == "__main__":
-    # Test with sample data
-    print("Testing BERT-PCA Preprocessor...")
-    
-    sample_texts = [
-        "Breaking news: Scientists discover new quantum computing breakthrough!",
-        "FAKE NEWS ALERT: Aliens landed in New York City yesterday!!!",
-        "Government announces new policy on climate change regulations."
-    ]
-    sample_labels = np.array([0, 1, 0])
-    
-    preprocessor = BERTPCAPreprocessor(n_components=8)
-    features, labels = preprocessor.fit_transform(sample_texts, sample_labels)
-    
-    print(f"\nProcessed features shape: {features.shape}")
-    print(f"Sample features:\n{features}")
+    # Simple test block
+    print("Testing Smart Path Resolution...")
+    # This simulates what run_training.py might be sending
+    resolve_dataset_path("drive/MyDrive/WELFake/WELFake_Dataset.csv")

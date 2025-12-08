@@ -1,0 +1,68 @@
+# Braket Ignore File - Exclude these from job submission tarball
+
+# Virtual environments
+myvenv/
+env/
+ENV/
+.venv
+venv/
+
+# Node modules
+frontend/node_modules/
+node_modules/
+
+# Git
+.git/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Data files (too large)
+data/*.csv
+data/*.tsv
+data/*.zip
+awscliv2.zip
+
+# Results and models
+results/
+*.pkl
+*.pth
+*.pt
+
+# AWS folder
+aws/dist/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+README.md
+
+# Frontend build
+frontend/build/
+frontend/dist/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Temporary
+tmp/
+temp/
+*.tmp
